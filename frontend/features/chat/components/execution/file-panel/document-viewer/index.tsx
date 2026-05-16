@@ -12,10 +12,15 @@ import {
   ChevronLeft,
   Maximize2,
   X,
+  Loader2,
+  AlertCircle,
 } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { Button } from "@/components/ui/button";
 import type { DocViewerProps } from "react-doc-viewer";
+import { Document, Page, pdfjs } from "react-pdf";
+import "react-pdf/dist/Page/TextLayer.css";
+import "react-pdf/dist/Page/AnnotationLayer.css";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
@@ -240,6 +245,16 @@ function DocumentViewerOverlaySkeleton({ label }: { label: string }) {
 
 const XMIND_SCRIPT_SRC =
   "https://unpkg.com/xmind-embed-viewer/dist/umd/xmind-embed-viewer.js";
+
+/** File extensions handled by Gotenberg (LibreOffice engine) instead of MS Office Online */
+const GOTENBERG_EXTENSIONS = new Set([
+  "doc",
+  "docx",
+  "xls",
+  "xlsx",
+  "ppt",
+  "pptx",
+]);
 
 let xmindScriptPromise: Promise<void> | null = null;
 
@@ -1479,6 +1494,24 @@ const DocumentViewerComponent = ({
     );
   }
 
+  // ─── Office documents → Gotenberg (LibreOffice → PDF) ──
+  // Replaces the previous MS Office Online iframe (react-doc-viewer MSDocRenderer)
+  if (GOTENBERG_EXTENSIONS.has(extension)) {
+    return (
+      <GotenbergOfficeViewer
+        file={file}
+        resolvedUrl={resolvedUrl}
+        extension={extension}
+        onClose={onClose}
+        onOpenPreviewWindow={onOpenPreviewWindow}
+        ensureFreshFile={ensureFreshFile}
+      />
+    );
+  }
+
+  // ─── DocViewer for images, PDFs, etc. (no MS Office) ──
+  // Note: office extensions (doc/docx/xls/xlsx/ppt/pptx) are intercepted above,
+  // so this block only handles bmp, jpg, jpeg, png, tiff, pdf
   if (docType) {
     const subtitle = (extension || docType).toUpperCase();
     const documentUri = resolvedUrl || file.url!;
@@ -1610,3 +1643,207 @@ const StatusLayout = ({
     {action}
   </div>
 );
+
+// ─── PDF.js Worker (for Gotenberg PDF output) ──────────────
+let gotenbergPdfWorkerConfigured = false;
+
+function ensureGotenbergPdfWorker() {
+  if (gotenbergPdfWorkerConfigured || typeof window === "undefined") return;
+  pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@4.3.136/build/pdf.worker.min.mjs`;
+  gotenbergPdfWorkerConfigured = true;
+}
+
+/** MIME types for Gotenberg LibreOffice conversion */
+const OFFICE_MIME_TYPES: Record<string, string> = {
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ppt: "application/vnd.ms-powerpoint",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+};
+
+/** State machine for Gotenberg document conversion */
+type GotenbergState =
+  | { status: "converting" }
+  | { status: "done"; pdfUrl: string }
+  | { status: "error"; message: string };
+
+/**
+ * Converts an office document to PDF via Gotenberg and renders it with react-pdf.
+ * Replaces the MS Office Online iframe (view.officeapps.live.com).
+ */
+function GotenbergOfficeViewer({
+  file,
+  resolvedUrl,
+  extension,
+  onClose,
+  onOpenPreviewWindow,
+  ensureFreshFile,
+}: {
+  file: FileNode;
+  resolvedUrl: string;
+  extension: string;
+  onClose?: () => void;
+  onOpenPreviewWindow?: (url: string) => void;
+  ensureFreshFile?: (file: FileNode) => Promise<FileNode>;
+}) {
+  const { t } = useT("translation");
+  const [state, setState] = React.useState<GotenbergState>({
+    status: "converting",
+  });
+  const [numPages, setNumPages] = React.useState<number | null>(null);
+
+  React.useEffect(() => {
+    ensureGotenbergPdfWorker();
+  }, []);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    const controller = new AbortController();
+
+    const convert = async () => {
+      try {
+        const fresh = ensureFreshFile ? await ensureFreshFile(file) : file;
+        const url = fresh?.url ?? resolvedUrl;
+        if (!url) {
+          setState({ status: "error", message: t("artifacts.viewer.noSource") });
+          return;
+        }
+
+        // 1. Fetch the file blob from RustFS
+        const fileResp = await fetch(url, { signal: controller.signal });
+        if (!fileResp.ok) {
+          throw new Error(`Fetch failed (${fileResp.status})`);
+        }
+        const fileBlob = await fileResp.blob();
+
+        // 2. Upload to Gotenberg via Caddy proxy for PDF conversion
+        const mimeType = OFFICE_MIME_TYPES[extension] ?? "application/octet-stream";
+        const formData = new FormData();
+        formData.append("files", fileBlob, file.name ?? `document.${extension}`);
+
+        const gotenbergResp = await fetch("/api/gotenberg/forms/libreoffice/convert", {
+          method: "POST",
+          body: formData,
+          signal: controller.signal,
+        });
+
+        if (!gotenbergResp.ok) {
+          const errText = await gotenbergResp.text().catch(() => "unknown");
+          throw new Error(`Conversion failed (${gotenbergResp.status}): ${errText}`);
+        }
+
+        // 3. Create blob URL for the resulting PDF
+        const pdfBlob = await gotenbergResp.blob();
+        if (cancelled) return;
+        const pdfUrl = URL.createObjectURL(pdfBlob);
+        setState({ status: "done", pdfUrl });
+      } catch (err) {
+        if (cancelled) return;
+        const message =
+          err instanceof Error && err.name !== "AbortError"
+            ? err.message
+            : t("artifacts.viewer.unknownError");
+        setState({ status: "error", message });
+      }
+    };
+
+    void convert();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [resolvedUrl, file, extension, ensureFreshFile, t]);
+
+  // Cleanup object URL on unmount
+  React.useEffect(() => {
+    return () => {
+      if (state.status === "done") {
+        URL.revokeObjectURL(state.pdfUrl);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const subtitle = extension.toUpperCase();
+  const handleDownload = async () => {
+    const fresh = ensureFreshFile ? await ensureFreshFile(file) : file;
+    const url = fresh?.url ?? resolvedUrl;
+    if (!url) return;
+    window.open(url, "_blank", "noopener,noreferrer");
+  };
+
+  return (
+    <div className={cn(VIEW_CLASSNAME, "rounded-xl border bg-card shadow-sm")}>
+      <DocumentViewerToolbar
+        file={file}
+        subtitle={subtitle}
+        resolvedUrl={resolvedUrl}
+        onClose={onClose}
+        onDownload={handleDownload}
+        onOpenPreviewWindow={onOpenPreviewWindow}
+      />
+      <div className="flex-1 overflow-hidden bg-black/5">
+        {state.status === "converting" && (
+          <div className="flex h-full items-center justify-center gap-3 text-muted-foreground">
+            <Loader2 className="size-5 animate-spin" />
+            <span>{t("artifacts.viewer.loadingDoc")}</span>
+          </div>
+        )}
+        {state.status === "error" && (
+          <StatusLayout
+            icon={AlertCircle}
+            title={t("artifacts.viewer.error")}
+            desc={state.message}
+          />
+        )}
+        {state.status === "done" && (
+          <div className="h-full overflow-y-auto p-4">
+            <div className="mx-auto max-w-4xl">
+              <Document
+                file={state.pdfUrl}
+                onLoadSuccess={({ numPages: n }) => setNumPages(n)}
+                loading={
+                  <div className="flex items-center justify-center gap-3 py-12 text-muted-foreground">
+                    <Loader2 className="size-5 animate-spin" />
+                    <span>{t("artifacts.viewer.loadingDoc")}</span>
+                  </div>
+                }
+                error={
+                  <StatusLayout
+                    icon={AlertCircle}
+                    title={t("artifacts.viewer.renderError") ?? "Failed to render PDF"}
+                  />
+                }
+              >
+                {Array.from(new Array(numPages ?? 1), (_, i) => (
+                  <React.Fragment key={`page_${i + 1}`}>
+                    <Page
+                      pageNumber={i + 1}
+                      renderTextLayer={true}
+                      renderAnnotationLayer={true}
+                      className="mb-4 rounded-lg bg-white shadow-md"
+                      width={Math.min(
+                        typeof window !== "undefined"
+                          ? window.innerWidth * 0.75
+                          : 800,
+                        1024,
+                      )}
+                    />
+                  </React.Fragment>
+                ))}
+              </Document>
+              {numPages !== null && (
+                <p className="pb-4 text-center text-xs text-muted-foreground">
+                  {numPages} {numPages === 1 ? "page" : "pages"}
+                </p>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

@@ -30,6 +30,12 @@
         reverse_proxy backend:8000
     }
 
+    # Document conversion via Gotenberg (proxied through Caddy to avoid CORS)
+    handle /api/gotenberg/* {
+        uri strip_prefix /api/gotenberg
+        reverse_proxy gotenberg:3000
+    }
+
     # S3 artifact proxy — no path modification (V4 signature compatibility)
     # Important: Host header must match the value used for presigned URL generation
     handle /poco-workspace/* {

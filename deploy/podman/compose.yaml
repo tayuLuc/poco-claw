@@ -169,6 +169,18 @@ services:
       - backend
     logging: *default-logging
 
+  # ─── Document Converter (Gotenberg) ────────────────────────
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    restart: unless-stopped
+    # Internal network only — access via Caddy
+    expose:
+      - 3000
+    environment:
+      # Enable CORS for browser-based uploads via Caddy proxy
+      GOTENBERG_API_ENABLE_CORS: "true"
+    logging: *default-logging
+
   # ─── Reverse Proxy (Caddy) ─────────────────────────────────
   caddy:
     image: docker.io/library/caddy:2.9-alpine
