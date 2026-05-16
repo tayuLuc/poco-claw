@@ -44,6 +44,11 @@ function configurePDFWorker() {
 // 模块加载即配置
 configurePDFWorker();
 
+/** Default renderers minus MSDocRenderer (no Microsoft Office Online dependency) */
+const GOTENBERG_RENDERERS = DocViewerRenderers.filter(
+  (r) => r.name !== "MSDocRenderer",
+);
+
 /**
  * 封装后的文档查看器客户端组件
  */
@@ -51,7 +56,7 @@ export function DocViewerClient(props: DocViewerProps) {
   return (
     <DocViewer
       {...props}
-      pluginRenderers={props.pluginRenderers ?? DocViewerRenderers}
+      pluginRenderers={props.pluginRenderers ?? GOTENBERG_RENDERERS}
     />
   );
 }

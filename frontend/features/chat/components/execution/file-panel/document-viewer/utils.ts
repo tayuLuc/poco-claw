@@ -6,17 +6,11 @@ import type { FileNode } from "@/features/chat/types";
 
 export const DOC_VIEWER_TYPE_MAP: Record<string, string> = {
   bmp: "bmp",
-  doc: "doc",
-  docx: "docx",
   jpg: "jpg",
   jpeg: "jpg",
   pdf: "pdf",
   png: "png",
-  ppt: "ppt",
-  pptx: "pptx",
   tiff: "tiff",
-  xls: "xls",
-  xlsx: "xlsx",
 };
 
 const TEXT_LANGUAGE_MAP: Record<string, string> = {
