@@ -1,0 +1,49 @@
+# Caddy reverse proxy for Poco-Claw
+# Only Caddy exposed externally — everything else on internal network
+
+# Local access (MacBook — localhost)
+:80 {
+    # API without v1 prefix — add v1 (only those not starting with /api/v1/)
+    @api_no_v1 {
+        path /api/*
+        not path /api/v1/*
+    }
+    handle @api_no_v1 {
+        uri replace /api/ /api/v1/
+        reverse_proxy backend:8000 {
+            header_up -Accept-Encoding
+            header_up Cookie "poco_session=single_user"
+        }
+    }
+
+    # API with v1 prefix — proxy directly to backend
+    handle /api/v1/* {
+        reverse_proxy backend:8000 {
+            header_up -Accept-Encoding
+            header_up Cookie "poco_session=single_user"
+        }
+    }
+    handle /ws/* {
+        reverse_proxy backend:8000
+    }
+    handle /health {
+        reverse_proxy backend:8000
+    }
+
+    # S3 artifact proxy — no path modification (V4 signature compatibility)
+    # Important: Host header must match the value used for presigned URL generation
+    handle /poco-workspace/* {
+        reverse_proxy rustfs:9000 {
+            # Do NOT override Host header — Poco generates presigned URLs with
+            # localhost:8080, and V4 signature is computed against that host.
+            # Changing Host would break signature verification.
+        }
+    }
+
+    # Everything else — proxy to frontend
+    handle {
+        reverse_proxy frontend:3000 {
+            header_up Cookie "poco_session=single_user"
+        }
+    }
+}

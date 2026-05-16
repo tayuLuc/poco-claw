@@ -1,0 +1,69 @@
+{
+  "api_key": "${OC_GO_CC_API_KEY}",
+  "host": "0.0.0.0",
+  "port": 3456,
+  "log_level": "info",
+  "hot_reload": false,
+  "enable_streaming_scenario_routing": false,
+
+  "models": {
+    "default": {
+      "provider": "opencode-go",
+      "model_id": "deepseek-v4-flash",
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "reasoning_effort": "max",
+      "thinking": {
+        "type": "enabled"
+      }
+    },
+    "deepseek-v4-flash": {
+      "provider": "opencode-go",
+      "model_id": "deepseek-v4-flash",
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "reasoning_effort": "max",
+      "thinking": {
+        "type": "enabled"
+      }
+    },
+    "deepseek-v4-pro": {
+      "provider": "opencode-go",
+      "model_id": "deepseek-v4-pro",
+      "temperature": 0.7,
+      "max_tokens": 8192,
+      "reasoning_effort": "max",
+      "thinking": {
+        "type": "enabled"
+      }
+    },
+    "fast": {
+      "provider": "opencode-go",
+      "model_id": "qwen3.6-plus",
+      "temperature": 0.7,
+      "max_tokens": 4096
+    }
+  },
+
+  "fallbacks": {
+    "default": [
+      { "provider": "opencode-go", "model_id": "mimo-v2-pro" },
+      { "provider": "opencode-go", "model_id": "qwen3.5-plus" }
+    ],
+    "fast": [
+      { "provider": "opencode-go", "model_id": "qwen3.5-plus" },
+      { "provider": "opencode-go", "model_id": "minimax-m2.5" }
+    ]
+  },
+
+  "opencode_go": {
+    "base_url": "https://opencode.ai/zen/go/v1/chat/completions",
+    "anthropic_base_url": "https://opencode.ai/zen/go/v1/messages",
+    "timeout_ms": 300000
+  },
+
+  "logging": {
+    "level": "info",
+    "requests": true
+  }
+}

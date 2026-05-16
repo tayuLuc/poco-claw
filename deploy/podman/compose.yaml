@@ -1,0 +1,196 @@
+# Poco-Claw — Podman Compose
+# Adapted for Mac (Apple Silicon) + Podman Machine
+# Run: podman compose up -d
+
+name: poco-claw
+
+x-logging: &default-logging
+  driver: journald
+  options:
+    tag: "poco/{{.Name}}"
+
+services:
+  # ─── Database ──────────────────────────────────────────────
+  postgres:
+    image: docker.io/postgres:16-alpine3.23
+    restart: unless-stopped
+    # Internal network only — not exposed to host
+    expose:
+      - 5432
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-poco}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-poco_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-poco}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-poco} -d ${POSTGRES_DB:-poco}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    logging: *default-logging
+
+  # ─── S3-compatible storage (workspace artifacts) ──────────
+  rustfs:
+    image: docker.io/rustfs/rustfs:1.0.0-beta.2
+    restart: unless-stopped
+    # Internal network only
+    expose:
+      - 9000
+      - 9001
+    environment:
+      RUSTFS_ROOT_USER: ${S3_ROOT_USER:-minioadmin}
+      RUSTFS_ROOT_PASSWORD: ${S3_ROOT_PASSWORD:-minioadmin}
+      RUSTFS_DOMAIN: ${S3_DOMAIN:-localhost}
+    volumes:
+      - rustfs:/data
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9000 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    logging: *default-logging
+
+  rustfs-init:
+    image: docker.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+    profiles: ["init"]
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "
+      mc alias set rustfs http://rustfs:9000 ${S3_ROOT_USER:-minioadmin} ${S3_ROOT_PASSWORD:-minioadmin} &&
+      mc mb rustfs/${S3_BUCKET:-poco-workspace} --ignore-existing
+      "
+    logging: *default-logging
+
+  # ─── Backend (FastAPI) ─────────────────────────────────────
+  backend:
+    image: ghcr.io/poco-ai/poco-backend:v0.5.1
+    restart: unless-stopped
+    # Internal network only — access via Caddy
+    expose:
+      - 8000
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-poco}:${POSTGRES_PASSWORD:-poco_secret}@postgres:5432/${POSTGRES_DB:-poco}
+      S3_ENDPOINT: http://rustfs:9000
+      S3_PUBLIC_ENDPOINT: http://localhost:8080
+      S3_ACCESS_KEY: ${S3_ROOT_USER:-minioadmin}
+      S3_SECRET_KEY: ${S3_ROOT_PASSWORD:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-poco-workspace}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # OpenCode Go via oc-go-cc proxy (Anthropic → OpenAI)
+      ANTHROPIC_BASE_URL: http://oc-go-cc:${OC_GO_CC_PORT:-3456}
+      ANTHROPIC_API_KEY: ${OC_GO_CC_API_KEY:?required}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-deepseek-v4-flash}
+      # Podman: host.containers.internal instead of host.docker.internal
+      EXECUTOR_MANAGER_BASE_URL: http://host.containers.internal:${EXECUTOR_MANAGER_PORT:-8001}
+      BACKEND_PORT: ${BACKEND_PORT:-8000}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AUTH_MODE: single_user
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rustfs:
+        condition: service_healthy
+      oc-go-cc:
+        condition: service_started
+    logging: *default-logging
+
+  # ─── OpenCode Go proxy (Anthropic → OpenAI) ────────────────
+  oc-go-cc:
+    build:
+      context: ./docker/oc-go-cc
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - 3456:3456
+    environment:
+      OC_GO_CC_API_KEY: ${OC_GO_CC_API_KEY:?required}
+      OC_GO_CC_HOST: 0.0.0.0
+      OC_GO_CC_PORT: ${OC_GO_CC_PORT:-3456}
+      OC_GO_CC_OPENCODE_URL: ${OC_GO_CC_OPENCODE_URL:-https://opencode.ai/zen/go/v1/chat/completions}
+      OC_GO_CC_LOG_LEVEL: ${OC_GO_CC_LOG_LEVEL:-info}
+    logging: *default-logging
+
+  # ─── Executor Manager (manages executor containers) ────────
+  executor-manager:
+    image: ghcr.io/poco-ai/poco-executor-manager:v0.5.1
+    restart: unless-stopped
+    ports:
+      - "${EXECUTOR_MANAGER_PORT:-8001}:8001"
+    environment:
+      BACKEND_URL: http://backend:8000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-poco}:${POSTGRES_PASSWORD:-poco_secret}@postgres:5432/${POSTGRES_DB:-poco}
+      S3_ENDPOINT: http://rustfs:9000
+      S3_ACCESS_KEY: ${S3_ROOT_USER:-minioadmin}
+      S3_SECRET_KEY: ${S3_ROOT_PASSWORD:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-poco-workspace}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      EXECUTOR_IMAGE: ${EXECUTOR_IMAGE:-ghcr.io/poco-ai/sandbox:lite}
+      EXECUTOR_BROWSER_IMAGE: ${EXECUTOR_BROWSER_IMAGE:-ghcr.io/poco-ai/sandbox:full}
+      CALLBACK_BASE_URL: http://host.containers.internal:${EXECUTOR_MANAGER_PORT:-8001}
+      # Proxy via oc-go-cc (Anthropic → OpenCode → DeepSeek)
+      # For spawned executor containers (not in compose network) use host.containers.internal
+      ANTHROPIC_BASE_URL: http://host.containers.internal:${OC_GO_CC_PORT:-3456}
+      ANTHROPIC_API_KEY: ${OC_GO_CC_API_KEY}
+      DEEPSEEK_BASE_URL: http://host.containers.internal:${OC_GO_CC_PORT:-3456}
+      EXECUTOR_PUBLISHED_HOST: host.containers.internal
+      OPENAI_API_KEY: ${OC_GO_CC_API_KEY}
+      # DeepSeek provider also via oc-go-cc
+      DEEPSEEK_API_KEY: ${OC_GO_CC_API_KEY}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-deepseek-v4-flash}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # TCP proxy to Podman API (runs on host, fixes host-gateway → 192.168.127.254)
+      DOCKER_HOST: tcp://host.containers.internal:12377
+    volumes:
+      # Workspace — container cannot create /var/lib/opencowork in rootless mode
+      - poco-workspace:/var/lib/opencowork
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rustfs:
+        condition: service_healthy
+    logging: *default-logging
+
+  # ─── Frontend (Next.js) ────────────────────────────────────
+  frontend:
+    image: ghcr.io/poco-ai/poco-frontend:v0.5.1
+    restart: unless-stopped
+    # Internal network only — access via Caddy
+    expose:
+      - 3000
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080}
+      BACKEND_URL: http://backend:8000
+    depends_on:
+      - backend
+    logging: *default-logging
+
+  # ─── Reverse Proxy (Caddy) ─────────────────────────────────
+  caddy:
+    image: docker.io/library/caddy:2.9-alpine
+    restart: unless-stopped
+    ports:
+      - "${CADDY_PORT:-8080}:80"
+      # Uncomment for HTTPS with TLS (requires a domain)
+      # - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      - frontend
+      - backend
+    logging: *default-logging
+
+volumes:
+  pgdata:
+    driver: local
+  rustfs:
+    driver: local
+  caddy-data:
+    driver: local
+  poco-workspace:
+    driver: local
