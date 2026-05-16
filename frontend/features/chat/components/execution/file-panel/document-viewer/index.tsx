@@ -1682,11 +1682,11 @@ function GotenbergOfficeViewer({
   ensureFreshFile,
 }: {
   file: FileNode;
-  resolvedUrl: string;
+  resolvedUrl?: string;
   extension: string;
   onClose?: () => void;
   onOpenPreviewWindow?: (url: string) => void;
-  ensureFreshFile?: (file: FileNode) => Promise<FileNode>;
+  ensureFreshFile?: (file: FileNode) => Promise<FileNode | undefined>;
 }) {
   const { t } = useT("translation");
   const [state, setState] = React.useState<GotenbergState>({
@@ -1783,7 +1783,11 @@ function GotenbergOfficeViewer({
         resolvedUrl={resolvedUrl}
         onClose={onClose}
         onDownload={handleDownload}
-        onOpenPreviewWindow={onOpenPreviewWindow}
+        onOpenPreviewWindow={
+          onOpenPreviewWindow && resolvedUrl
+            ? () => onOpenPreviewWindow(resolvedUrl)
+            : undefined
+        }
       />
       <div className="flex-1 overflow-hidden bg-black/5">
         {state.status === "converting" && (
